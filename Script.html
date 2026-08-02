@@ -1,0 +1,885 @@
+<script>
+/**
+ * ============================================================================
+ * UPSC MASTER OS v6.0 - CLIENT-SIDE APPLICATION ENGINE (VANILLA JS)
+ * ============================================================================
+ */
+
+// 1. ANALYTICS ENGINE & CONSTANTS
+var WORKLOAD_WEIGHTS = {
+  vid: 1.00,
+  book: 0.80,
+  rev: 1.20,
+  aw: 1.40,
+  ca: 0.90,
+  mock: 1.50
+};
+
+function safeNum(val, fallback) {
+  var n = Number(val);
+  return isNaN(n) || !isFinite(n) ? (fallback || 0) : n;
+}
+
+function computeAnalytics(state, syllabus, logs) {
+  var c = state.config || {};
+  var dy = state.daily || {};
+
+  // Total Workload
+  var totalLecHrs = safeNum(c.targetLectures) * safeNum(c.avgLecDuration, 2.5);
+  var totalWorkload =
+    (totalLecHrs * WORKLOAD_WEIGHTS.vid) +
+    (safeNum(c.targetBookHrs) * WORKLOAD_WEIGHTS.book) +
+    (safeNum(c.targetRevHrs) * WORKLOAD_WEIGHTS.rev) +
+    (safeNum(c.targetAWHours) * WORKLOAD_WEIGHTS.aw) +
+    (safeNum(c.targetCAHrs) * WORKLOAD_WEIGHTS.ca) +
+    (safeNum(c.targetMockHrs) * WORKLOAD_WEIGHTS.mock);
+
+  // Active Totals including today's daily inputs
+  var actLec = safeNum(state.totalLecturesDone) + safeNum(dy.lectures);
+  var actVid = safeNum(state.totalVideoHours) + safeNum(dy.videoHrs);
+  var actBook = safeNum(state.totalBookHours) + safeNum(dy.bookHrs);
+  var actRev = safeNum(state.totalRevHours) + safeNum(dy.revHrs);
+  var actAw = safeNum(state.totalAWHours) + safeNum(dy.awHrs);
+  var actCa = safeNum(state.totalCAHours) + safeNum(dy.caHrs);
+  var actMock = safeNum(state.totalMockHrs) + safeNum(dy.mockHrs);
+
+  // Work Scores
+  var todayWorkScore =
+    (safeNum(dy.videoHrs) * WORKLOAD_WEIGHTS.vid) +
+    (safeNum(dy.bookHrs) * WORKLOAD_WEIGHTS.book) +
+    (safeNum(dy.revHrs) * WORKLOAD_WEIGHTS.rev) +
+    (safeNum(dy.awHrs) * WORKLOAD_WEIGHTS.aw) +
+    (safeNum(dy.caHrs) * WORKLOAD_WEIGHTS.ca) +
+    (safeNum(dy.mockHrs) * WORKLOAD_WEIGHTS.mock);
+
+  var completedWork =
+    (actVid * WORKLOAD_WEIGHTS.vid) +
+    (actBook * WORKLOAD_WEIGHTS.book) +
+    (actRev * WORKLOAD_WEIGHTS.rev) +
+    (actAw * WORKLOAD_WEIGHTS.aw) +
+    (actCa * WORKLOAD_WEIGHTS.ca) +
+    (actMock * WORKLOAD_WEIGHTS.mock);
+
+  var remainingWork = Math.max(0, totalWorkload - completedWork);
+
+  // Days & Tracking
+  var totalDaysPassed = Math.max(1, logs.length || 1);
+  var activeDays = safeNum(state.totalActiveDays) + (todayWorkScore > 0 ? 1 : 0);
+  if (activeDays === 0) activeDays = 1;
+  var missedDays = Math.max(0, totalDaysPassed - activeDays);
+
+  // Weighted Productivity formula
+  var sum7 = todayWorkScore;
+  var sum30 = todayWorkScore;
+  var count7 = 1;
+  var count30 = 1;
+
+  var logsReversed = logs.slice().reverse();
+  for (var i = 0; i < logsReversed.length; i++) {
+    if (count30 >= 30) break;
+    sum30 += safeNum(logsReversed[i].workScore);
+    count30++;
+    if (count7 < 7) {
+      sum7 += safeNum(logsReversed[i].workScore);
+      count7++;
+    }
+  }
+
+  var avg7 = sum7 / 7;
+  var avg30 = sum30 / 30;
+  var avgAll = completedWork / Math.max(1, totalDaysPassed);
+
+  var weightedProd = (avg7 * 0.50) + (avg30 * 0.30) + (avgAll * 0.20);
+  if (weightedProd < 0.1) weightedProd = 0.1;
+
+  // Remaining Days & Dynamic Finish Date Prediction
+  var remainingDays = Math.ceil(remainingWork / weightedProd);
+  var targetDateObj = new Date();
+  targetDateObj.setDate(targetDateObj.getDate() + remainingDays);
+
+  var estimatedFinishDate = targetDateObj.toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric'
+  });
+
+  var overallProgressPct = Math.min(100, (completedWork / Math.max(1, totalWorkload)) * 100);
+
+  // Recovery Mode
+  var isRecoveryMode = avg7 < avgAll && logs.length > 3;
+
+  // Required Daily Paces
+  var safeRemDays = Math.max(1, remainingDays);
+  var requiredDailyWorkScore = remainingWork / safeRemDays;
+  var requiredDailyLectures = Math.max(0, safeNum(c.targetLectures) - actLec) / safeRemDays;
+  var requiredDailyBookHrs = Math.max(0, safeNum(c.targetBookHrs) - actBook) / safeRemDays;
+  var requiredDailyRevHrs = Math.max(0, safeNum(c.targetRevHrs) - actRev) / safeRemDays;
+  var requiredDailyTotalHours = requiredDailyBookHrs + requiredDailyRevHrs + (requiredDailyLectures * safeNum(c.avgLecDuration, 2.5));
+
+  // Topic Progress
+  var totalTopicsCount = 0;
+  Object.keys(syllabus).forEach(function(s) {
+    totalTopicsCount += (syllabus[s] || []).length;
+  });
+  if (totalTopicsCount === 0) totalTopicsCount = 1;
+
+  var completedTopicsCount = (state.completedTopics || []).length;
+  var topicProgressPct = Math.round((completedTopicsCount / totalTopicsCount) * 100);
+
+  // XP & Rank
+  var netXP = completedWork * 10;
+  var xpPerLevel = 500;
+  var rankLevel = Math.floor(netXP / xpPerLevel) + 1;
+  var rankXpPct = Math.min(100, ((netXP % xpPerLevel) / xpPerLevel) * 100);
+
+  var rankTitle = 'LBSNAA TRAINEE';
+  if (rankLevel >= 30) rankTitle = 'CABINET SECRETARY';
+  else if (rankLevel >= 20) rankTitle = 'JOINT SECRETARY';
+  else if (rankLevel >= 10) rankTitle = 'DISTRICT COLLECTOR';
+  else if (rankLevel >= 5) rankTitle = 'SUB-DIVISIONAL MAGISTRATE';
+
+  return {
+    totalWorkload: totalWorkload,
+    completedWork: completedWork,
+    remainingWork: remainingWork,
+    weightedProductivity: weightedProd,
+    remainingDays: remainingDays,
+    estimatedFinishDate: estimatedFinishDate,
+    overallProgressPct: overallProgressPct,
+    isRecoveryMode: isRecoveryMode,
+    requiredDailyWorkScore: requiredDailyWorkScore,
+    requiredDailyLectures: requiredDailyLectures,
+    requiredDailyBookHrs: requiredDailyBookHrs,
+    requiredDailyRevHrs: requiredDailyRevHrs,
+    requiredDailyTotalHours: requiredDailyTotalHours,
+    todayWorkScore: todayWorkScore,
+    currentStreak: safeNum(state.streakCount),
+    longestStreak: safeNum(state.longestStreak),
+    missedDays: missedDays,
+    activeDays: activeDays,
+    rankTitle: rankTitle,
+    rankLevel: rankLevel,
+    rankXpPct: rankXpPct,
+    completedTopicsCount: completedTopicsCount,
+    totalTopicsCount: totalTopicsCount,
+    topicProgressPct: topicProgressPct,
+    activeLectures: actLec,
+    activeVideoHrs: actVid,
+    activeBookHrs: actBook,
+    activeRevHrs: actRev,
+    activeAWHrs: actAw,
+    activeCAHrs: actCa,
+    activeMockHrs: actMock
+  };
+}
+
+// 2. STATE VARIABLES
+var appState = null;
+var syllabusData = {};
+var dailyLogs = [];
+var activeTab = 'analytics';
+var isDirty = false;
+var topicsChartInstance = null;
+var workScoreChartInstance = null;
+
+var aiMessages = [
+  {
+    role: 'assistant',
+    content: '🏛️ **Welcome to UPSC Master OS AI Strategic Mentor!**\n\nHow can I help optimize your study routine, revision cycles, or answer writing strategy today?',
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+];
+
+// 3. INITIALIZATION
+window.addEventListener('DOMContentLoaded', function() {
+  initApp();
+});
+
+function initApp() {
+  setupNavigation();
+  setupEventHandlers();
+
+  // Load from Apps Script server
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run.withSuccessHandler(onStateLoaded).getStateData();
+  } else {
+    // Fallback to local fetch API or local default state
+    fetch('/api/state')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        onStateLoaded(data);
+      })
+      .catch(function() {
+        onStateLoaded({
+          state: window.INITIAL_STATE || {},
+          syllabus: window.DEFAULT_SYLLABUS || {},
+          logs: window.DEFAULT_LOGS || []
+        });
+      });
+  }
+}
+
+function onStateLoaded(data) {
+  if (data.state) appState = data.state;
+  if (data.syllabus) syllabusData = data.syllabus;
+  if (data.logs) dailyLogs = data.logs;
+
+  populateSubjectDropdown();
+  renderAllViews();
+}
+
+function markDirty() {
+  isDirty = true;
+  document.getElementById('btn-save-text').innerText = 'Unsaved State';
+  document.getElementById('btn-save-state').className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer font-mono uppercase tracking-wider bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-black animate-pulse';
+}
+
+// 4. RENDERING VIEWS
+function renderAllViews() {
+  if (!appState || !syllabusData) return;
+
+  var analytics = computeAnalytics(appState, syllabusData, dailyLogs);
+
+  renderSidebar(analytics);
+  renderAnalyticsView(analytics);
+  renderSyllabusView();
+  renderMockTestsView();
+  renderSettingsView();
+}
+
+// Sidebar HUD Render
+function renderSidebar(analytics) {
+  document.getElementById('hud-finish-date').innerText = analytics.estimatedFinishDate;
+  document.getElementById('hud-days-left').innerText = analytics.remainingDays + ' Days Left';
+  document.getElementById('hud-progress-pct').innerText = analytics.overallProgressPct.toFixed(2) + '%';
+  
+  var recEl = document.getElementById('hud-recovery-mode');
+  if (analytics.isRecoveryMode) {
+    recEl.innerText = 'ACTIVE (Velocity Drop)';
+    recEl.className = 'font-bold text-rose-400 animate-pulse';
+  } else {
+    recEl.innerText = 'OFF (Optimal Pace)';
+    recEl.className = 'font-bold text-emerald-400';
+  }
+
+  document.getElementById('hud-streak').innerText = analytics.currentStreak + ' Days';
+  document.getElementById('hud-req-hrs').innerText = analytics.requiredDailyTotalHours.toFixed(1) + ' hrs';
+  document.getElementById('hud-missed-days').innerText = analytics.missedDays;
+
+  // Topic Completion Ring
+  document.getElementById('hud-topic-pct-text').innerText = analytics.topicProgressPct + '%';
+  document.getElementById('hud-topic-count-text').innerText = analytics.completedTopicsCount + ' / ' + analytics.totalTopicsCount + ' Syllabus Topics Done';
+  var circle = document.getElementById('hud-topic-circle');
+  var offset = 251.2 - (251.2 * analytics.topicProgressPct) / 100;
+  circle.style.strokeDashoffset = offset;
+
+  // Daily Inputs Protocol
+  var dy = appState.daily || {};
+  document.getElementById('daily-lectures-val').innerText = safeNum(dy.lectures);
+  document.getElementById('daily-videoHrs-val').innerText = safeNum(dy.videoHrs).toFixed(1);
+  document.getElementById('daily-bookHrs-val').innerText = safeNum(dy.bookHrs).toFixed(1);
+  document.getElementById('daily-revHrs-val').innerText = safeNum(dy.revHrs).toFixed(1);
+  document.getElementById('daily-awHrs-val').innerText = safeNum(dy.awHrs).toFixed(1);
+  document.getElementById('daily-caHrs-val').innerText = safeNum(dy.caHrs).toFixed(1);
+  document.getElementById('daily-mockHrs-val').innerText = safeNum(dy.mockHrs).toFixed(1);
+  document.getElementById('daily-work-score').innerText = analytics.todayWorkScore.toFixed(1);
+
+  // Gamification Rank
+  document.getElementById('rank-lvl-badge').innerText = 'LVL ' + analytics.rankLevel;
+  document.getElementById('rank-title-text').innerText = analytics.rankTitle;
+  document.getElementById('xp-val-text').innerText = Math.floor(appState.netXP || 0);
+  document.getElementById('xp-pct-text').innerText = Math.floor(analytics.rankXpPct) + '%';
+  document.getElementById('xp-bar-fill').style.width = analytics.rankXpPct + '%';
+}
+
+// Analytics View Render
+function renderAnalyticsView(analytics) {
+  document.getElementById('kpi-total-workload').innerText = analytics.totalWorkload.toFixed(0);
+  document.getElementById('kpi-completed-work').innerText = analytics.completedWork.toFixed(0);
+  document.getElementById('kpi-remaining-work').innerText = analytics.remainingWork.toFixed(0);
+  document.getElementById('kpi-weighted-prod').innerText = analytics.weightedProductivity.toFixed(1);
+
+  document.getElementById('kpi-active-days').innerText = analytics.activeDays;
+  document.getElementById('kpi-missed-days').innerText = analytics.missedDays;
+  document.getElementById('kpi-curr-streak').innerText = analytics.currentStreak;
+  document.getElementById('kpi-long-streak').innerText = analytics.longestStreak;
+
+  document.getElementById('req-work-score').innerText = analytics.requiredDailyWorkScore.toFixed(1);
+  document.getElementById('req-lectures').innerText = analytics.requiredDailyLectures.toFixed(1);
+  document.getElementById('req-book-hrs').innerText = analytics.requiredDailyBookHrs.toFixed(1);
+  document.getElementById('req-rev-hrs').innerText = analytics.requiredDailyRevHrs.toFixed(1);
+
+  // Render Charts using Chart.js
+  renderCharts();
+
+  // Populate Category Statistics Table
+  var tbody = document.getElementById('tbl-category-stats');
+  tbody.innerHTML = `
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Lectures</td>
+      <td class="px-4 py-3 text-right">1,800</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeLectures}</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 1800 - analytics.activeLectures)}</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeLectures / 1800) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Video Hours</td>
+      <td class="px-4 py-3 text-right">4,500 h</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeVideoHrs.toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 4500 - analytics.activeVideoHrs).toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeVideoHrs / 4500) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Book Reading Hours</td>
+      <td class="px-4 py-3 text-right">1,500 h</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeBookHrs.toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 1500 - analytics.activeBookHrs).toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeBookHrs / 1500) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Revision Hours</td>
+      <td class="px-4 py-3 text-right">500 h</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeRevHrs.toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 500 - analytics.activeRevHrs).toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeRevHrs / 500) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Answer Writing Hours</td>
+      <td class="px-4 py-3 text-right">500 h</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeAWHrs.toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 500 - analytics.activeAWHrs).toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeAWHrs / 500) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+      <td class="px-4 py-3 font-semibold">Current Affairs Hours</td>
+      <td class="px-4 py-3 text-right">500 h</td>
+      <td class="px-4 py-3 text-right text-emerald-400 font-bold">${analytics.activeCAHrs.toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right orange-glow">${Math.max(0, 500 - analytics.activeCAHrs).toFixed(1)} h</td>
+      <td class="px-4 py-3 text-right">${((analytics.activeCAHrs / 500) * 100).toFixed(1)}%</td>
+    </tr>
+    <tr class="bg-[#0A0F18]/80 font-bold">
+      <td class="px-4 py-3 text-cyan-300">Syllabus Topics Total</td>
+      <td class="px-4 py-3 text-right">${analytics.totalTopicsCount}</td>
+      <td class="px-4 py-3 text-right text-emerald-400">${analytics.completedTopicsCount}</td>
+      <td class="px-4 py-3 text-right orange-glow">${analytics.totalTopicsCount - analytics.completedTopicsCount}</td>
+      <td class="px-4 py-3 text-right text-cyan-300">${analytics.topicProgressPct}%</td>
+    </tr>
+  `;
+}
+
+// Chart.js initialization
+function renderCharts() {
+  if (typeof Chart === 'undefined') return;
+
+  var recentLogs = dailyLogs.slice(-10);
+  var labels = recentLogs.map(function(l) { return l.date.slice(5); });
+  var topicsData = recentLogs.map(function(l) { return l.topics || 0; });
+  var workScoreData = recentLogs.map(function(l) { return l.workScore || 0; });
+
+  // 1. Topics Chart
+  var ctxTopics = document.getElementById('chart-topics-history');
+  if (ctxTopics) {
+    if (topicsChartInstance) topicsChartInstance.destroy();
+    topicsChartInstance = new Chart(ctxTopics, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Topics Completed',
+          data: topicsData,
+          backgroundColor: '#00f2fe',
+          borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e293b' } }
+        }
+      }
+    });
+  }
+
+  // 2. Work Score Chart
+  var ctxWork = document.getElementById('chart-workscore-history');
+  if (ctxWork) {
+    if (workScoreChartInstance) workScoreChartInstance.destroy();
+    workScoreChartInstance = new Chart(ctxWork, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Work Score',
+          data: workScoreData,
+          backgroundColor: '#f97316',
+          borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { display: false } },
+          y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e293b' } }
+        }
+      }
+    });
+  }
+}
+
+// Syllabus View Render
+function populateSubjectDropdown() {
+  var sel = document.getElementById('sel-subject-filter');
+  if (!sel) return;
+
+  var subjects = Object.keys(syllabusData);
+  sel.innerHTML = '<option value="ALL">All Subjects</option>';
+  subjects.forEach(function(subj) {
+    var count = (syllabusData[subj] || []).length;
+    sel.innerHTML += '<option value="' + subj + '">' + subj + ' (' + count + ')</option>';
+  });
+}
+
+function renderSyllabusView() {
+  var container = document.getElementById('topics-cards-container');
+  if (!container) return;
+
+  var selSubject = document.getElementById('sel-subject-filter').value;
+  var selPyq = document.getElementById('sel-pyq-filter').value;
+  var selStatus = document.getElementById('sel-status-filter').value;
+  var searchQuery = (document.getElementById('input-topic-search').value || '').toLowerCase();
+
+  var completed = appState.completedTopics || [];
+  var starred = appState.starredTopics || [];
+  var weak = appState.weakTopics || [];
+
+  var allTopics = [];
+  Object.keys(syllabusData).forEach(function(subj) {
+    (syllabusData[subj] || []).forEach(function(item) {
+      allTopics.push({
+        id: item.id,
+        title: item.title,
+        pyq: item.pyq,
+        subject: subj
+      });
+    });
+  });
+
+  var filtered = allTopics.filter(function(item) {
+    if (selSubject !== 'ALL' && item.subject !== selSubject) return false;
+    if (selPyq !== 'ALL' && item.pyq !== selPyq) return false;
+
+    var isComp = completed.indexOf(item.id) > -1;
+    var isStar = starred.indexOf(item.id) > -1;
+    var isWk = weak.indexOf(item.id) > -1;
+
+    if (selStatus === 'COMPLETED' && !isComp) return false;
+    if (selStatus === 'PENDING' && isComp) return false;
+    if (selStatus === 'STARRED' && !isStar) return false;
+    if (selStatus === 'WEAK' && !isWk) return false;
+
+    if (searchQuery) {
+      var matchTitle = item.title.toLowerCase().indexOf(searchQuery) > -1;
+      var matchSubject = item.subject.toLowerCase().indexOf(searchQuery) > -1;
+      if (!matchTitle && !matchSubject) return false;
+    }
+
+    return true;
+  });
+
+  document.getElementById('topic-filtered-count').innerText = 'Showing ' + filtered.length + ' of ' + allTopics.length + ' topics';
+  document.getElementById('topic-completed-total').innerText = completed.length + ' Total Completed';
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="text-center py-12 bg-slate-900/50 rounded-xl border border-slate-800 text-slate-400 font-mono text-xs">No syllabus topics matched your active filters.</div>';
+    return;
+  }
+
+  var html = '';
+  filtered.forEach(function(item) {
+    var isComp = completed.indexOf(item.id) > -1;
+    var isStar = starred.indexOf(item.id) > -1;
+    var isWk = weak.indexOf(item.id) > -1;
+
+    var pyqBadgeClass = item.pyq === 'High'
+      ? 'bg-rose-950/80 text-rose-300 border border-rose-500/40'
+      : item.pyq === 'Medium'
+      ? 'bg-amber-950/80 text-amber-300 border border-amber-500/40'
+      : 'bg-slate-800/80 text-slate-300';
+
+    html += `
+      <div class="p-3 rounded-xl border transition-all duration-200 flex items-start gap-3 ${isComp ? 'bg-[#0A0F18]/50 border-slate-800/60 opacity-60' : 'glass-card border-slate-800 hover:border-cyan-500/50'}">
+        <button onclick="toggleTopic('${item.id}', 'completedTopics')" class="mt-0.5 text-slate-500 hover:text-cyan-400 transition-colors cursor-pointer">
+          ${isComp ? '☑' : '☐'}
+        </button>
+
+        <div class="flex-1 cursor-pointer" onclick="toggleTopic('${item.id}', 'completedTopics')">
+          <div class="flex items-center gap-2 mb-1 flex-wrap">
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-[#0A0F18] text-slate-400 border border-slate-800">${item.subject}</span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded font-bold ${pyqBadgeClass}">${item.pyq === 'High' ? '🔥 High PYQ' : item.pyq === 'Medium' ? '⚡ Medium PYQ' : 'PYQ'}</span>
+          </div>
+          <div class="text-xs font-semibold leading-relaxed ${isComp ? 'line-through text-slate-500' : 'text-slate-100'}">${item.title}</div>
+        </div>
+
+        <div class="flex items-center gap-1 shrink-0 pt-0.5">
+          <button onclick="toggleTopic('${item.id}', 'starredTopics')" class="p-1 rounded text-xs transition-colors cursor-pointer ${isStar ? 'text-amber-400 font-bold' : 'text-slate-600'}">
+            ★
+          </button>
+          <button onclick="toggleTopic('${item.id}', 'weakTopics')" class="p-1 rounded text-xs transition-colors cursor-pointer ${isWk ? 'text-rose-400 font-bold' : 'text-slate-600'}">
+            ⚠️
+          </button>
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+}
+
+// Mock Tests View Render
+function renderMockTestsView() {
+  var tests = appState.mockTests || [];
+
+  var totalTests = tests.length;
+  var avgScore = totalTests > 0
+    ? tests.reduce(function(acc, t) { return acc + (t.score / (t.maxScore || 200)) * 100; }, 0) / totalTests
+    : 0;
+  var maxRecorded = totalTests > 0
+    ? Math.max.apply(null, tests.map(function(t) { return (t.score / (t.maxScore || 200)) * 100; }))
+    : 0;
+
+  document.getElementById('mock-total-logged').innerText = totalTests;
+  document.getElementById('mock-avg-pct').innerText = avgScore.toFixed(1) + '%';
+  document.getElementById('mock-max-pct').innerText = maxRecorded.toFixed(1) + '%';
+
+  var tbody = document.getElementById('tbl-mock-history');
+  if (tests.length === 0) {
+    tbody.innerHTML = '<tr><td colSpan="7" class="text-center py-8 text-slate-500 font-mono">No mock test records logged yet. Add your first score above.</td></tr>';
+    return;
+  }
+
+  var html = '';
+  tests.forEach(function(t) {
+    var pct = ((t.score / (t.maxScore || 200)) * 100).toFixed(1);
+    var badgeClass = Number(pct) >= 55
+      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-500/40'
+      : Number(pct) >= 45
+      ? 'bg-amber-950/80 text-amber-300 border border-amber-500/40'
+      : 'bg-rose-950/80 text-rose-300 border border-rose-500/40';
+
+    html += `
+      <tr class="hover:bg-slate-800/30 transition-colors">
+        <td class="px-4 py-3 font-semibold text-white">${t.name}</td>
+        <td class="px-4 py-3 text-slate-400">${t.subject || 'GS'}</td>
+        <td class="px-4 py-3 text-center font-bold text-cyan-300">${t.score} / ${t.maxScore || 200}</td>
+        <td class="px-4 py-3 text-center"><span class="px-2 py-0.5 rounded font-bold ${badgeClass}">${pct}%</span></td>
+        <td class="px-4 py-3 text-slate-400">${t.date}</td>
+        <td class="px-4 py-3 text-slate-400 max-w-xs truncate">${t.notes || '-'}</td>
+        <td class="px-4 py-3 text-right">
+          <button onclick="deleteMockTest('${t.id}')" class="p-1 rounded text-slate-500 hover:text-rose-400 font-mono cursor-pointer">🗑️</button>
+        </td>
+      </tr>
+    `;
+  });
+
+  tbody.innerHTML = html;
+}
+
+// Settings View Render
+function renderSettingsView() {
+  var c = appState.config || {};
+  document.getElementById('cfg-targetLectures').value = c.targetLectures || 1800;
+  document.getElementById('cfg-avgLecDuration').value = c.avgLecDuration || 2.5;
+  document.getElementById('cfg-targetBookHrs').value = c.targetBookHrs || 1500;
+  document.getElementById('cfg-targetRevHrs').value = c.targetRevHrs || 500;
+  document.getElementById('cfg-targetAWHours').value = c.targetAWHours || 500;
+  document.getElementById('cfg-targetCAHrs').value = c.targetCAHrs || 500;
+  document.getElementById('cfg-targetMockHrs').value = c.targetMockHrs || 200;
+}
+
+// 5. INTERACTION HANDLERS
+function setupNavigation() {
+  var buttons = document.querySelectorAll('.tab-btn');
+  buttons.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      buttons.forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+
+      activeTab = btn.getAttribute('data-tab');
+
+      document.getElementById('view-analytics').classList.add('hidden');
+      document.getElementById('view-checklist').classList.add('hidden');
+      document.getElementById('view-mock').classList.add('hidden');
+      document.getElementById('view-settings').classList.add('hidden');
+
+      document.getElementById('view-' + activeTab).classList.remove('hidden');
+      renderAllViews();
+    });
+  });
+}
+
+function setupEventHandlers() {
+  // Save state button
+  document.getElementById('btn-save-state').addEventListener('click', saveState);
+
+  // Syllabus filters
+  document.getElementById('sel-subject-filter').addEventListener('change', renderSyllabusView);
+  document.getElementById('sel-pyq-filter').addEventListener('change', renderSyllabusView);
+  document.getElementById('sel-status-filter').addEventListener('change', renderSyllabusView);
+  document.getElementById('input-topic-search').addEventListener('input', renderSyllabusView);
+
+  // Mock test form
+  document.getElementById('form-add-mock').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var name = document.getElementById('mock-input-name').value.trim();
+    var score = Number(document.getElementById('mock-input-score').value);
+    var maxScore = Number(document.getElementById('mock-input-max').value) || 200;
+    var subject = document.getElementById('mock-input-subject').value.trim();
+    var notes = document.getElementById('mock-input-notes').value.trim();
+
+    if (!name || isNaN(score)) return;
+
+    var todayStr = new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+
+    var newTest = {
+      id: 'm-' + Date.now(),
+      name: name,
+      score: score,
+      maxScore: maxScore,
+      subject: subject || 'General Studies',
+      date: todayStr,
+      notes: notes
+    };
+
+    appState.mockTests = [newTest].concat(appState.mockTests || []);
+    markDirty();
+
+    document.getElementById('mock-input-name').value = '';
+    document.getElementById('mock-input-score').value = '';
+    document.getElementById('mock-input-subject').value = '';
+    document.getElementById('mock-input-notes').value = '';
+
+    renderAllViews();
+    showToast('✅ Mock test record added!');
+  });
+
+  // AI Coach modal controls
+  document.getElementById('btn-open-ai-coach').addEventListener('click', function() {
+    document.getElementById('ai-coach-modal').classList.remove('hidden');
+    renderAiChatThread();
+  });
+
+  document.getElementById('btn-close-ai-modal').addEventListener('click', function() {
+    document.getElementById('ai-coach-modal').classList.add('hidden');
+  });
+
+  document.getElementById('form-ai-input').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var input = document.getElementById('input-ai-prompt');
+    var txt = input.value.trim();
+    if (!txt) return;
+    input.value = '';
+    sendAiMessage(txt);
+  });
+}
+
+function adjDaily(key, delta) {
+  if (!appState || !appState.daily) return;
+  var curr = safeNum(appState.daily[key]);
+  var newVal = Math.max(0, curr + delta);
+  appState.daily[key] = newVal;
+  markDirty();
+  renderAllViews();
+}
+
+function toggleTopic(id, arrayName) {
+  if (!appState) return;
+  var arr = appState[arrayName] || [];
+  var idx = arr.indexOf(id);
+  if (idx > -1) {
+    arr.splice(idx, 1);
+  } else {
+    arr.push(id);
+  }
+  appState[arrayName] = arr;
+  markDirty();
+  renderAllViews();
+}
+
+function deleteMockTest(id) {
+  if (!appState || !appState.mockTests) return;
+  appState.mockTests = appState.mockTests.filter(function(t) { return t.id !== id; });
+  markDirty();
+  renderAllViews();
+  showToast('🗑️ Mock test record deleted.');
+}
+
+function updateConfig(key, val) {
+  if (!appState || !appState.config) return;
+  appState.config[key] = Math.max(0.1, safeNum(val));
+  markDirty();
+  renderAllViews();
+}
+
+function saveState() {
+  if (!appState) return;
+  document.getElementById('btn-save-text').innerText = 'Saving...';
+
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(res) {
+        isDirty = false;
+        document.getElementById('btn-save-text').innerText = 'Save State';
+        document.getElementById('btn-save-state').className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer font-mono uppercase tracking-wider bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-cyan-900';
+        showToast('💾 State Saved to Google Apps Script Properties!');
+      })
+      .saveStateData(appState);
+  } else {
+    // REST API fallback
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: appState })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function() {
+      isDirty = false;
+      document.getElementById('btn-save-text').innerText = 'Save State';
+      document.getElementById('btn-save-state').className = 'flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all shadow-md cursor-pointer font-mono uppercase tracking-wider bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-cyan-900';
+      showToast('💾 State Saved Successfully!');
+    })
+    .catch(function() {
+      showToast('✅ Saved to Local Session');
+    });
+  }
+}
+
+// AI Coach Messaging
+function renderAiChatThread() {
+  var container = document.getElementById('ai-chat-thread');
+  var html = '';
+  aiMessages.forEach(function(msg) {
+    var isUser = msg.role === 'user';
+    html += `
+      <div class="flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}">
+        ${!isUser ? '<div class="p-2 rounded-xl bg-orange-950/80 border border-orange-500/30 text-orange-400 shrink-0 h-fit mt-1">🤖</div>' : ''}
+        <div class="max-w-[85%] p-3.5 rounded-2xl ${isUser ? 'bg-orange-500 text-slate-950 font-semibold rounded-tr-none' : 'glass-card border border-slate-800 text-slate-200 rounded-tl-none'}">
+          <div class="whitespace-pre-wrap font-sans">${msg.content}</div>
+          <div class="text-[9px] font-mono mt-1 ${isUser ? 'text-slate-900 text-right' : 'text-slate-500'}">${msg.time}</div>
+        </div>
+        ${isUser ? '<div class="p-2 rounded-xl bg-cyan-950 border border-cyan-500/30 text-cyan-300 shrink-0 h-fit mt-1">👤</div>' : ''}
+      </div>
+    `;
+  });
+  container.innerHTML = html;
+  container.scrollTop = container.scrollHeight;
+}
+
+function sendQuickPrompt(promptText) {
+  sendAiMessage(promptText);
+}
+
+function sendAiMessage(promptText) {
+  aiMessages.push({
+    role: 'user',
+    content: promptText,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  });
+  renderAiChatThread();
+
+  var analytics = computeAnalytics(appState, syllabusData, dailyLogs);
+  var payload = {
+    userPrompt: promptText,
+    summaryMetrics: analytics
+  };
+
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    google.script.run
+      .withSuccessHandler(function(res) {
+        aiMessages.push({
+          role: 'assistant',
+          content: res.text || res.error || 'Response generated.',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        });
+        renderAiChatThread();
+      })
+      .getAiCoachResponse(payload);
+  } else {
+    fetch('/api/ai-coach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      aiMessages.push({
+        role: 'assistant',
+        content: data.text || data.error || 'Response generated.',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+      renderAiChatThread();
+    })
+    .catch(function(err) {
+      aiMessages.push({
+        role: 'assistant',
+        content: '❌ Error: ' + err.toString(),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+      renderAiChatThread();
+    });
+  }
+}
+
+// Backup & Restore
+function exportJsonBackup() {
+  var dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(appState, null, 2));
+  var a = document.createElement('a');
+  a.href = dataStr;
+  a.download = 'UPSC_Master_OS_Backup_' + new Date().toISOString().split('T')[0] + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function importJsonBackup(e) {
+  var file = e.target.files[0];
+  if (!file) return;
+
+  var reader = new FileReader();
+  reader.onload = function(evt) {
+    try {
+      var imported = JSON.parse(evt.target.result);
+      appState = Object.assign({}, appState, imported);
+      markDirty();
+      renderAllViews();
+      showToast('📥 Backup imported successfully!');
+    } catch (err) {
+      showToast('❌ Invalid JSON backup file.');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function resetStateBaseline() {
+  if (confirm('Are you sure you want to reset all progress to initial default baseline?')) {
+    appState = Object.assign({}, window.INITIAL_STATE || {});
+    markDirty();
+    renderAllViews();
+    showToast('🔄 Reset to initial baseline.');
+  }
+}
+
+function showToast(msg) {
+  var banner = document.getElementById('toast-banner');
+  var text = document.getElementById('toast-text');
+  text.innerText = msg;
+  banner.classList.remove('hidden');
+  setTimeout(function() {
+    banner.classList.add('hidden');
+  }, 3500);
+}
+</script>

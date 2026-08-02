@@ -1,0 +1,8 @@
+{
+  "name": "Remix UPSC Master OS",
+  "description": "Production cyber-dashboard OS for UPSC CSE aspirants featuring dynamic AI ETA prediction, comprehensive syllabus tracker with PYQ weightage, daily study protocol logging, XP gamification with civil service ranks, performance charts, and AI study coach.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
